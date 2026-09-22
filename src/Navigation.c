@@ -183,7 +183,7 @@ float convert_coordinates_lat(char *source_data, uint16_t message_pos, uint16_t 
     float minutes = (source_data[message_pos + 2] - '0') * 10.0f + (source_data[message_pos + 3] - '0');
 
     float decimal = 0.1f;
-    uint16_t j = message_pos + 5; // пропускаем ddmm.
+    uint16_t j = message_pos + 5; // Пропускаем ddmm.
 
     while (j < i)
     {
@@ -212,7 +212,7 @@ float convert_coordinates_long(char *source_data, uint16_t message_pos, uint16_t
     float minutes = (source_data[message_pos + 3] - '0') * 10.0f + (source_data[message_pos + 4] - '0');
 
     float decimal = 0.1f;
-    uint16_t j = message_pos + 6; // пропускаем dddmm.
+    uint16_t j = message_pos + 6; // Пропускаем dddmm.
 
     while (j < i)
     {
@@ -483,8 +483,6 @@ int main()
 
     while (1)
     {
-        // GPIOA->ODR ^= GPIO_ODR_OD5;
-
         if (frame_gps_saved)
         {
             if (upload_gnss_data(size_gps_data, gps_data))
@@ -518,83 +516,5 @@ int main()
 
             frame_gps_saved = false;
         }
-
-        // for (int i = 0; i < 100; i++)
-        // {
-        //     if (frame[i] == '$')
-        //     {
-        //         uart2_write_string("Found '$' in frame!\r\n");
-        //         // Вывести первые 80 символов
-        //         for (int j = i; j < i + 80 && j < sizeof(frame); j++)
-        //         {
-        //             uart2_write_byte(frame[j]);
-        //         }
-        //         uart2_write_string("\r\n");
-        //         break;
-        //     }
-        // }
-        // for (volatile uint32_t i = 0; i < 100; i++)
-        // {
-        // }
     }
-    // while (1)
-    // {
-    //     // if (DMA2_Stream2->NDTR < sizeof(frame))
-    //     // {
-    //     //     uart2_write_string("DMA WORKS\r\n");
-
-    //     //     for (int i = 0; i < 100; i++)
-    //     //     {
-    //     //         uart2_write_byte(frame[i]);
-    //     //     }
-
-    //     //     while (1)
-    //     //         ;
-    //     // }
-    //     // if (uart1_available())
-    //     // {
-    //     //     uint8_t byte = uart1_read_byte();
-
-    //     //     // Ждём начало NMEA-пакета
-    //     //     if (byte != '$')
-    //     //         continue;
-
-    //     //     char package[256];
-    //     //     int i = 0;
-    //     //     bool valid = false;
-    //     //     // Записываем
-    //     //     package[i] = byte;
-    //     //     i++;
-    //     //     // Читаем пакет
-    //     //     while (i < 255)
-    //     //     {
-    //     //         byte = uart1_read_byte();
-    //     //         package[i] = byte;
-    //     //         i++;
-    //     //         if (byte == '\n')
-    //     //             break;
-    //     //     }
-
-    //     //     package[i] = '\0';
-
-    //     //     // Проверяем тип пакета
-    //     //     if (i >= 6)
-    //     //     {
-    //     //         if ((package[3] == 'R' &&
-    //     //              package[4] == 'M' &&
-    //     //              package[5] == 'C') ||
-    //     //             (package[3] == 'V' &&
-    //     //              package[4] == 'T' &&
-    //     //              package[5] == 'G'))
-    //     //         {
-    //     //             valid = true;
-    //     //         }
-    //     //     }
-
-    //     //     if (valid)
-    //     //     {
-    //     //         uart2_write_string(package);
-    //     //     }
-    //     // }
-    // }
 }
