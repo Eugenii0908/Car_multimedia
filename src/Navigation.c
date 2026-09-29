@@ -4,10 +4,15 @@
 #include <stdlib.h>
 #include <float.h>
 
+const float gravitation = 9.80665;
+const float rad = 3.14159 / 180.0;
+
 volatile char frame_gps[2048] = {0};
 char gps_data[2048] = {0};
 volatile bool frame_gps_saved = false;
 uint16_t size_gps_data = 0;
+
+uint8_t imu_data[12];
 
 struct Gnss_data
 {
@@ -19,6 +24,13 @@ struct Gnss_data
     float hdop;
 };
 struct Gnss_data Gnss_data;
+
+struct IMU_data
+{
+    float omega[3];
+    float accel[3];
+};
+struct IMU_data IMU_data[2];
 
 // Считывание байта
 uint8_t uart1_read_byte()
@@ -100,6 +112,7 @@ void uart2_init()
     NVIC_EnableIRQ(USART1_IRQn);
 }
 
+// Инициализация dma2 для ГНСС
 void dma2_init()
 {
     RCC->AHB1ENR |= (1 << RCC_AHB1ENR_DMA2EN_Pos);
@@ -119,6 +132,7 @@ void dma2_init()
     DMA2_Stream2->CR |= DMA_SxCR_EN;
 }
 
+// Обработчик прерывания по собитию появления данных от ГНСС
 void USART1_IRQHandler(void)
 {
     if (USART1->SR & USART_SR_IDLE)
@@ -166,6 +180,7 @@ void USART1_IRQHandler(void)
     }
 }
 
+// Преобразование из char координат широты
 float convert_coordinates_lat(char *source_data, uint16_t message_pos, uint16_t data_size)
 {
     uint16_t i = message_pos;
@@ -195,6 +210,7 @@ float convert_coordinates_lat(char *source_data, uint16_t message_pos, uint16_t 
     return degrees + minutes / 60.0f;
 }
 
+// Преобразование из char координат долготы
 float convert_coordinates_long(char *source_data, uint16_t message_pos, uint16_t data_size)
 {
     uint16_t i = message_pos;
@@ -224,6 +240,7 @@ float convert_coordinates_long(char *source_data, uint16_t message_pos, uint16_t
     return degrees + minutes / 60.0f;
 }
 
+// Преобразование из char в float
 float convert_float(char *source_data, uint16_t message_pos, uint16_t data_size)
 {
     uint16_t i = message_pos;
@@ -262,6 +279,7 @@ float convert_float(char *source_data, uint16_t message_pos, uint16_t data_size)
     return number;
 }
 
+// Преобразование из char в uint
 uint16_t convert_int(char *source_data, uint16_t message_pos, uint16_t data_size)
 {
     uint16_t i = message_pos;
@@ -284,15 +302,17 @@ uint16_t convert_int(char *source_data, uint16_t message_pos, uint16_t data_size
     return number;
 }
 
+// Обновление данных в структуре ГНСС кадра
 bool upload_gnss_data(uint16_t data_size, char *source_data)
 {
     bool start_message = false, rmc = false, gga = false;
-    uint8_t data_register = 0b00000000;
+    uint8_t data_register = 0b00000000; // регистр обновленных данных
     uint16_t message_pos = 0;
     uint8_t num_field = 0;
     for (uint16_t i = 0; i < data_size; i++)
     {
         message_pos++;
+        // Поиск начала строки
         if (source_data[i] == '$')
         {
             start_message = true;
@@ -303,6 +323,7 @@ bool upload_gnss_data(uint16_t data_size, char *source_data)
         }
         if (data_register == 0b00111111)
             return true;
+        // Поиск ключевых слов нужных строк
         if (start_message && (message_pos == 5))
         {
             if ((source_data[i] == 'C') &&
@@ -320,6 +341,7 @@ bool upload_gnss_data(uint16_t data_size, char *source_data)
             else
                 start_message = false;
         }
+        // Обработка строки rmc
         if (rmc)
         {
             if (source_data[i] == ',')
@@ -372,6 +394,7 @@ bool upload_gnss_data(uint16_t data_size, char *source_data)
                 break;
             }
         }
+        // Обработка строки gga
         if (gga)
         {
             if (source_data[i] == ',')
@@ -402,6 +425,7 @@ bool upload_gnss_data(uint16_t data_size, char *source_data)
     return (data_register == 0b00111111);
 }
 
+// Вывод в сериал порт uint16
 void uart2_write_uint(uint16_t value)
 {
     char buffer[5];
@@ -424,6 +448,8 @@ void uart2_write_uint(uint16_t value)
         uart2_write_byte(buffer[--i]);
     }
 }
+
+// Вывод в сериал порт uint32
 void uart2_write_uint32(uint32_t value)
 {
     char buffer[10];
@@ -446,7 +472,9 @@ void uart2_write_uint32(uint32_t value)
         uart2_write_byte(buffer[--i]);
     }
 }
-void uart2_write_float5(float value)
+
+// Вывод в сериал порт float
+void uart2_write_float(float value)
 {
     if (value < 0)
     {
@@ -467,6 +495,199 @@ void uart2_write_float5(float value)
     uart2_write_byte('0' + fraction % 10);
 }
 
+// Вывод в сериал порт int16
+void uart2_write_int16(int16_t value)
+{
+    if (value < 0)
+    {
+        uart2_write_byte('-');
+        value = -value;
+    }
+
+    uart2_write_uint((uint16_t)value);
+}
+
+// Инициализация i2c
+void i2c1_init()
+{
+    RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
+    GPIOB->MODER &= ~((3 << 16) | (3 << 18));
+    GPIOB->MODER |= ((2 << 16) | (2 << 18));
+    GPIOB->AFR[1] &= ~((0xF << 0) | (0xF << 4));
+    GPIOB->AFR[1] |= ((4 << 0) | (4 << 4));
+    GPIOB->OTYPER |= (1 << 8) | (1 << 9);
+    RCC->APB1RSTR |= RCC_APB1RSTR_I2C1RST;
+    RCC->APB1RSTR &= ~RCC_APB1RSTR_I2C1RST;
+    I2C1->CR2 = 16;
+    I2C1->CCR = 80;
+    I2C1->TRISE = 17;
+    I2C1->CR1 |= I2C_CR1_PE;
+}
+
+// Конфигурация 2 датчиков imu
+void imu_config()
+{
+    write_conf_imu(0x68, 0x7E, 0x11); // ACC normal
+    write_conf_imu(0x68, 0x7E, 0x15); // GYRO normal
+    write_conf_imu(0x68, 0x43, 0x4);  // GYRO +-125 grad/s
+    write_conf_imu(0x69, 0x7E, 0x11); // ACC normal
+    write_conf_imu(0x69, 0x7E, 0x15); // GYRO normal
+    write_conf_imu(0x69, 0x43, 0x4);  // GYRO +-125 grad/s
+    for (volatile int i = 0; i < 2000000; i++)
+        __NOP();
+}
+
+// Сформировать стартовый бит
+void I2C1_Start(void)
+{
+    I2C1->CR1 |= I2C_CR1_START;
+
+    while (!(I2C1->SR1 & I2C_SR1_SB))
+        ;
+}
+
+// Сформировать бит остановки
+void I2C1_Stop(void)
+{
+    I2C1->CR1 |= I2C_CR1_STOP;
+}
+
+// Очистить ADDR
+void clean_addr()
+{
+    volatile uint32_t tmp;
+    tmp = I2C1->SR1;
+    tmp = I2C1->SR2;
+    (void)tmp;
+}
+
+// Отправить адрес и режим r/w
+bool I2C1_SendAddress(uint8_t address, bool read)
+{
+    // Байт адреса с режимом
+    uint8_t addr = (address << 1) | (read ? 1 : 0);
+
+    I2C1->DR = addr;
+
+    while (!(I2C1->SR1 & (I2C_SR1_ADDR | I2C_SR1_AF)))
+        ;
+
+    // Если ошибка
+    if (I2C1->SR1 & I2C_SR1_AF)
+    {
+
+        I2C1->SR1 &= ~I2C_SR1_AF;
+        I2C1_Stop();
+        return false;
+    }
+
+    return true;
+}
+
+// Отправить байт данных
+void I2C1_WriteByte(uint8_t data)
+{
+    I2C1->DR = data;
+
+    while (!(I2C1->SR1 & I2C_SR1_TXE))
+        ;
+
+    while (!(I2C1->SR1 & I2C_SR1_BTF))
+        ;
+}
+
+// Прочитать несколько байт
+void I2C1_ReadBytes(uint8_t *buffer, uint8_t length)
+{
+    clean_addr();
+
+    for (uint8_t i = 0; i < length; i++)
+    {
+        if (i == length - 1)
+        {
+            // Последний байт не подтверждаем
+            I2C1->CR1 &= ~I2C_CR1_ACK;
+            I2C1_Stop();
+        }
+        else
+        {
+            // Все остальные байты подтверждаем
+            I2C1->CR1 |= I2C_CR1_ACK;
+        }
+
+        while (!(I2C1->SR1 & I2C_SR1_RXNE))
+            ;
+
+        buffer[i] = I2C1->DR;
+    }
+
+    // Возвращаем ACK для следующего обмена
+    I2C1->CR1 |= I2C_CR1_ACK;
+}
+
+// Получение данных от датчика
+bool read_imu_frame(uint8_t address, uint8_t *buffer)
+{
+    // START
+    I2C1_Start();
+
+    // Адрес BMI160 + WRITE
+    if (!I2C1_SendAddress(address, false))
+        return false;
+
+    clean_addr();
+
+    // Начальный регистр гироскопа
+    I2C1_WriteByte(0x0C);
+
+    // REPEATED START
+    I2C1_Start();
+
+    // Адрес BMI160 + READ
+    if (!I2C1_SendAddress(address, true))
+        return false;
+
+    clean_addr();
+
+    // Читаем 12 байт
+    I2C1_ReadBytes(buffer, 12);
+
+    return true;
+}
+
+// Записать регистр
+void write_conf_imu(uint8_t address, uint8_t reg, uint8_t data)
+{
+    I2C1_Start();
+
+    if (!I2C1_SendAddress(address, false))
+        return;
+
+    clean_addr();
+
+    I2C1_WriteByte(reg);
+    I2C1_WriteByte(data);
+
+    I2C1_Stop();
+}
+
+// Конвертировать угловую скорость
+void convert_IMU_data(uint8_t *source_data, uint8_t num_IMU)
+{
+    int16_t gx = (int16_t)((source_data[1] << 8) | source_data[0]);
+    IMU_data[num_IMU].omega[0] = (gx / 262.4f) * rad;
+    int16_t gy = (int16_t)((source_data[3] << 8) | source_data[2]);
+    IMU_data[num_IMU].omega[1] = (gy / 262.4f) * rad;
+    int16_t gz = (int16_t)((source_data[5] << 8) | source_data[4]);
+    IMU_data[num_IMU].omega[2] = (gz / 262.4f) * rad;
+    int16_t ax = (int16_t)((source_data[7] << 8) | source_data[6]);
+    IMU_data[num_IMU].accel[0] = (ax / 16384.0f) * gravitation;
+    int16_t ay = (int16_t)((source_data[9] << 8) | source_data[8]);
+    IMU_data[num_IMU].accel[1] = (ay / 16384.0f) * gravitation;
+    int16_t az = (int16_t)((source_data[11] << 8) | source_data[10]);
+    IMU_data[num_IMU].accel[2] = (az / 16384.0f) * gravitation;
+}
+
 int main()
 {
     // Служебный светодиод
@@ -480,41 +701,90 @@ int main()
     uart2_init();
     dma2_init();
     uart2_write_string("AFTER DMA INIT\r\n");
+    i2c1_init();
+    imu_config();
 
     while (1)
     {
-        if (frame_gps_saved)
+        uint8_t imu1_data[12];
+        uint8_t imu2_data[12];
+
+        if (read_imu_frame(0x68, imu1_data))
         {
-            if (upload_gnss_data(size_gps_data, gps_data))
+            convert_IMU_data(imu1_data, 0);
+            uart2_write_string("omega1 = [");
+            for (int i = 0; i < 3; i++)
             {
-                uart2_write_string("LAT: ");
-                uart2_write_float5(Gnss_data.latitude);
-                uart2_write_string("\r\n");
-
-                uart2_write_string("LON: ");
-                uart2_write_float5(Gnss_data.longitude);
-                uart2_write_string("\r\n");
-
-                uart2_write_string("SPEED: ");
-                uart2_write_float5(Gnss_data.speed);
-                uart2_write_string("\r\n");
-
-                uart2_write_string("COURSE: ");
-                uart2_write_float5(Gnss_data.course);
-                uart2_write_string("\r\n");
-
-                uart2_write_string("SAT: ");
-                uart2_write_uint(Gnss_data.num_sat);
-                uart2_write_string("\r\n");
-
-                uart2_write_string("HDOP: ");
-                uart2_write_float5(Gnss_data.hdop);
-                uart2_write_string("\r\n");
-
-                uart2_write_string("----------------\r\n");
+                uart2_write_float(IMU_data[0].omega[i]);
+                uart2_write_string(",");
             }
-
-            frame_gps_saved = false;
+            uart2_write_string("]    accel1 = [");
+            for (int i = 0; i < 3; i++)
+            {
+                uart2_write_float(IMU_data[0].accel[i]);
+                uart2_write_string(",");
+            }
+            uart2_write_string("]\n");
         }
+        else
+        {
+            uart2_write_string("IMU1 ERROR\r\n");
+        }
+        if (read_imu_frame(0x69, imu2_data))
+        {
+            convert_IMU_data(imu2_data, 1);
+            uart2_write_string("omega2 = [");
+            for (int i = 0; i < 3; i++)
+            {
+                uart2_write_float(IMU_data[1].omega[i]);
+                uart2_write_string(",");
+            }
+            uart2_write_string("]    accel2 = [");
+            for (int i = 0; i < 3; i++)
+            {
+                uart2_write_float(IMU_data[1].accel[i]);
+                uart2_write_string(",");
+            }
+            uart2_write_string("]\n\n");
+        }
+        else
+        {
+            uart2_write_string("IMU2 ERROR\r\n");
+        }
+        for (int i = 0; i < 3200000; i++)
+            __NOP();
+        //     if (frame_gps_saved)
+        //     {
+        //         if (upload_gnss_data(size_gps_data, gps_data))
+        //         {
+        //             uart2_write_string("LAT: ");
+        //             uart2_write_float(Gnss_data.latitude);
+        //             uart2_write_string("\r\n");
+
+        //             uart2_write_string("LON: ");
+        //             uart2_write_float(Gnss_data.longitude);
+        //             uart2_write_string("\r\n");
+
+        //             uart2_write_string("SPEED: ");
+        //             uart2_write_float(Gnss_data.speed);
+        //             uart2_write_string("\r\n");
+
+        //             uart2_write_string("COURSE: ");
+        //             uart2_write_float(Gnss_data.course);
+        //             uart2_write_string("\r\n");
+
+        //             uart2_write_string("SAT: ");
+        //             uart2_write_uint(Gnss_data.num_sat);
+        //             uart2_write_string("\r\n");
+
+        //             uart2_write_string("HDOP: ");
+        //             uart2_write_float(Gnss_data.hdop);
+        //             uart2_write_string("\r\n");
+
+        //             uart2_write_string("----------------\r\n");
+        //         }
+
+        //         frame_gps_saved = false;
+        //     }
     }
 }
