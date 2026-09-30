@@ -12,8 +12,6 @@ char gps_data[2048] = {0};
 volatile bool frame_gps_saved = false;
 uint16_t size_gps_data = 0;
 
-uint8_t imu_data[12];
-
 struct Gnss_data
 {
     float longitude;
@@ -24,6 +22,20 @@ struct Gnss_data
     float hdop;
 };
 struct Gnss_data Gnss_data;
+
+enum imu_state
+{
+    wait,
+    start,
+    sent_data1,
+    got_data1,
+    sent_data2,
+    got_data2
+};
+enum imu_state imu_state = wait;
+
+uint8_t imu1_data[12];
+uint8_t imu2_data[12];
 
 struct IMU_data
 {
@@ -524,6 +536,47 @@ void i2c1_init()
     I2C1->CR1 |= I2C_CR1_PE;
 }
 
+// Инициализация dma1 для IMU
+void dma1_init()
+{
+    RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN;
+
+    // Отключение потока
+    DMA1_Stream0->CR &= ~DMA_SxCR_EN;
+    // Ждём, пока реально выключится
+    while (DMA1_Stream0->CR & DMA_SxCR_EN)
+        ;
+
+    // Полностью очищаем настройки Stream 0
+    DMA1_Stream0->CR = 0;
+    // Адрес данных
+    DMA1_Stream0->PAR = (uint32_t)&I2C1->DR;
+    // Конфигурация потока (Канал 1, прерывание по окончанию передачи, инкремент адреса массива данных)
+    DMA1_Stream0->CR |= (1 << DMA_SxCR_CHSEL_Pos) | (DMA_SxCR_TCIE) | (DMA_SxCR_MINC);
+
+    //  Разрешение прерывания
+    NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+}
+
+// Обработчик прерывания по получению данных от IMU
+void DMA1_Stream0_IRQHandler(void)
+{
+    if (DMA1->LISR & DMA_LISR_TCIF0)
+    {
+        // Сбрасываем Transfer Complete
+        DMA1->LIFCR = DMA_LIFCR_CTCIF0;
+        I2C1_Stop();
+        I2C1->CR2 &= ~(I2C_CR2_DMAEN | I2C_CR2_LAST);
+        // Возвращаем АСК
+        I2C1->CR1 |= I2C_CR1_ACK;
+
+        if (imu_state == sent_data1)
+            imu_state = got_data1;
+        else if (imu_state == sent_data2)
+            imu_state = got_data2;
+    }
+}
+
 // Конфигурация 2 датчиков imu
 void imu_config()
 {
@@ -596,42 +649,13 @@ void I2C1_WriteByte(uint8_t data)
         ;
 }
 
-// Прочитать несколько байт
-void I2C1_ReadBytes(uint8_t *buffer, uint8_t length)
-{
-    clean_addr();
-
-    for (uint8_t i = 0; i < length; i++)
-    {
-        if (i == length - 1)
-        {
-            // Последний байт не подтверждаем
-            I2C1->CR1 &= ~I2C_CR1_ACK;
-            I2C1_Stop();
-        }
-        else
-        {
-            // Все остальные байты подтверждаем
-            I2C1->CR1 |= I2C_CR1_ACK;
-        }
-
-        while (!(I2C1->SR1 & I2C_SR1_RXNE))
-            ;
-
-        buffer[i] = I2C1->DR;
-    }
-
-    // Возвращаем ACK для следующего обмена
-    I2C1->CR1 |= I2C_CR1_ACK;
-}
-
-// Получение данных от датчика
+// Прочитать кадр imu
 bool read_imu_frame(uint8_t address, uint8_t *buffer)
 {
-    // START
+    // Стартовый бит
     I2C1_Start();
 
-    // Адрес BMI160 + WRITE
+    // Отправляем адрес в режиме w
     if (!I2C1_SendAddress(address, false))
         return false;
 
@@ -640,18 +664,50 @@ bool read_imu_frame(uint8_t address, uint8_t *buffer)
     // Начальный регистр гироскопа
     I2C1_WriteByte(0x0C);
 
-    // REPEATED START
+    // Повторный старт
     I2C1_Start();
 
-    // Адрес BMI160 + READ
+    // Подготовка DMA
+
+    // Stream должен быть выключен
+    DMA1_Stream0->CR &= ~DMA_SxCR_EN;
+
+    while (DMA1_Stream0->CR & DMA_SxCR_EN)
+        ;
+
+    // Сбрасываем флаги
+    DMA1->LIFCR =
+        DMA_LIFCR_CFEIF0 |
+        DMA_LIFCR_CDMEIF0 |
+        DMA_LIFCR_CTEIF0 |
+        DMA_LIFCR_CHTIF0 |
+        DMA_LIFCR_CTCIF0;
+
+    // Куда писать
+    DMA1_Stream0->M0AR = (uint32_t)buffer;
+
+    // Сколько байт получить
+    DMA1_Stream0->NDTR = 12;
+
+    // Разрешаем ACK
+    I2C1->CR1 |= I2C_CR1_ACK;
+
+    // Последний DMA transfer — последний байт I2C
+    I2C1->CR2 |= I2C_CR2_LAST;
+
+    // Разрешаем DMA запросы от I2C
+    I2C1->CR2 |= I2C_CR2_DMAEN;
+
+    // Запускаем DMA
+    DMA1_Stream0->CR |= DMA_SxCR_EN;
+
+    // Отправляем адрес в режиме r
+
     if (!I2C1_SendAddress(address, true))
         return false;
 
     clean_addr();
-
-    // Читаем 12 байт
-    I2C1_ReadBytes(buffer, 12);
-
+    // Возврат и ожидание завершения прерывания
     return true;
 }
 
@@ -688,6 +744,39 @@ void convert_IMU_data(uint8_t *source_data, uint8_t num_IMU)
     IMU_data[num_IMU].accel[2] = (az / 16384.0f) * gravitation;
 }
 
+// Таймер с периодом 0.1с
+void tim6_init(void)
+{
+    // Тактирование TIM6 на APB1
+    RCC->APB1ENR |= RCC_APB1ENR_TIM6EN;
+
+    // Предделитель и автоперезагрузка
+    TIM6->PSC = 16000 - 1; // 1 тик = 1 мс
+    TIM6->ARR = 100 - 1;   // 100 тиков = 100 мс
+
+    // Разрешить прерывание по переполнению
+    TIM6->DIER |= TIM_DIER_UIE;
+
+    // Разрешить прерывание в NVIC
+    NVIC_EnableIRQ(TIM6_DAC_IRQn);
+
+    // Запустить таймер
+    TIM6->CR1 |= TIM_CR1_CEN;
+}
+
+// Обработчик прерываний
+void TIM6_DAC_IRQHandler(void)
+{
+    if (TIM6->SR & TIM_SR_UIF)
+    {
+        // Сброс флага
+        TIM6->SR &= ~TIM_SR_UIF;
+
+        // Состояние пора читать IMU
+        imu_state = start;
+    }
+}
+
 int main()
 {
     // Служебный светодиод
@@ -697,19 +786,35 @@ int main()
     GPIOA->BSRR = GPIO_BSRR_BR5;
 
     RCC->AHB1ENR |= (1 << RCC_AHB1ENR_GPIOBEN_Pos); // Включение тактирования GPIOB (UART)
+    dma2_init();
     uart1_init();
     uart2_init();
-    dma2_init();
-    uart2_write_string("AFTER DMA INIT\r\n");
+    dma1_init();
     i2c1_init();
     imu_config();
+    tim6_init();
 
     while (1)
     {
-        uint8_t imu1_data[12];
-        uint8_t imu2_data[12];
-
-        if (read_imu_frame(0x68, imu1_data))
+        if (imu_state == start)
+        {
+            imu_state = sent_data1;
+            if (!read_imu_frame(0x68, imu1_data))
+            {
+                imu_state = got_data1;
+                continue;
+            }
+        }
+        if (imu_state == got_data1)
+        {
+            imu_state = sent_data2;
+            if (!read_imu_frame(0x69, imu2_data))
+            {
+                imu_state = got_data2;
+                continue;
+            }
+        }
+        if (imu_state == got_data2)
         {
             convert_IMU_data(imu1_data, 0);
             uart2_write_string("omega1 = [");
@@ -725,13 +830,6 @@ int main()
                 uart2_write_string(",");
             }
             uart2_write_string("]\n");
-        }
-        else
-        {
-            uart2_write_string("IMU1 ERROR\r\n");
-        }
-        if (read_imu_frame(0x69, imu2_data))
-        {
             convert_IMU_data(imu2_data, 1);
             uart2_write_string("omega2 = [");
             for (int i = 0; i < 3; i++)
@@ -746,13 +844,10 @@ int main()
                 uart2_write_string(",");
             }
             uart2_write_string("]\n\n");
+            imu_state = wait;
         }
-        else
-        {
-            uart2_write_string("IMU2 ERROR\r\n");
-        }
-        for (int i = 0; i < 3200000; i++)
-            __NOP();
+        // for (int i = 0; i < 3200000; i++)
+        //     __NOP();
         //     if (frame_gps_saved)
         //     {
         //         if (upload_gnss_data(size_gps_data, gps_data))
