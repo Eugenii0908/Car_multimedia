@@ -18,6 +18,7 @@ struct Gnss_data
     float latitude;
     float speed;
     float course;
+    float altitude;
     uint8_t num_sat;
     float hdop;
 };
@@ -43,6 +44,8 @@ struct IMU_data
     float accel[3];
 };
 struct IMU_data IMU_data[2];
+const float IMU_bias[2][6] = {{-0.024215, 0.022141667, 0.041238333, -0.41622, 0.184996667, -0.412796667},
+                              {-0.005181667, -0.002211667, -0.008165, -0.286498333, -0.286141667, -0.149075}};
 
 // Считывание байта
 uint8_t uart1_read_byte()
@@ -100,8 +103,7 @@ void uart1_init()
                     (2 << GPIO_MODER_MODER7_Pos); // Включаем альтернативную функцию для пинов
     GPIOB->AFR[0] |= (7 << GPIO_AFRL_AFSEL6_Pos) |
                      (7 << GPIO_AFRL_AFSEL7_Pos); // Выбираем альтернативную функцию для нашего UART
-    USART1->BRR = (104 << USART_BRR_DIV_Mantissa_Pos) |
-                  (3 << USART_BRR_DIV_Fraction_Pos); // Записываем скорость (9600 бод)
+    USART1->BRR = 9375U;                          // PCLK2 = 90 MHz, 9600 бод
     USART1->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
     USART1->CR3 |= USART_CR3_DMAR;
     USART1->CR1 |= USART_CR1_IDLEIE;
@@ -118,8 +120,7 @@ void uart2_init()
                     (2 << GPIO_MODER_MODER3_Pos); // Включаем альтернативную функцию для пинов
     GPIOA->AFR[0] |= (7 << GPIO_AFRL_AFSEL2_Pos) |
                      (7 << GPIO_AFRL_AFSEL3_Pos); // Выбираем альтернативную функцию для нашего UART
-    USART2->BRR = (104 << USART_BRR_DIV_Mantissa_Pos) |
-                  (3 << USART_BRR_DIV_Fraction_Pos); // Записываем скорость (9600 бод)
+    USART2->BRR = 4688U;                          // PCLK1 = 45 MHz, 9600 бод
     USART2->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
     NVIC_EnableIRQ(USART1_IRQn);
 }
@@ -333,7 +334,7 @@ bool upload_gnss_data(uint16_t data_size, char *source_data)
             gga = false;
             num_field = 0;
         }
-        if (data_register == 0b00111111)
+        if (data_register == 0b01111111)
             return true;
         // Поиск ключевых слов нужных строк
         if (start_message && (message_pos == 5))
@@ -428,6 +429,14 @@ bool upload_gnss_data(uint16_t data_size, char *source_data)
                 {
                     Gnss_data.hdop = convert_float(source_data, i, data_size);
                     data_register |= 0b00100000;
+                }
+                start_message = false;
+                break;
+            case 9:
+                if (!((1 << 6) & data_register))
+                {
+                    Gnss_data.altitude = convert_float(source_data, i, data_size);
+                    data_register |= 0b01000000;
                 }
                 start_message = false;
                 break;
@@ -530,9 +539,9 @@ void i2c1_init()
     GPIOB->OTYPER |= (1 << 8) | (1 << 9);
     RCC->APB1RSTR |= RCC_APB1RSTR_I2C1RST;
     RCC->APB1RSTR &= ~RCC_APB1RSTR_I2C1RST;
-    I2C1->CR2 = 16;
-    I2C1->CCR = 80;
-    I2C1->TRISE = 17;
+    I2C1->CR2 = 45;   // Частота PCLK1 = 45 MHz
+    I2C1->CCR = 225;  // SCL = 100 kHz, Standard Mode
+    I2C1->TRISE = 46; // Максимальное время нарастания для 100 kHz
     I2C1->CR1 |= I2C_CR1_PE;
 }
 
@@ -727,21 +736,21 @@ void write_conf_imu(uint8_t address, uint8_t reg, uint8_t data)
     I2C1_Stop();
 }
 
-// Конвертировать угловую скорость
+// Конвертировать угловую скорость и ускорение
 void convert_IMU_data(uint8_t *source_data, uint8_t num_IMU)
 {
     int16_t gx = (int16_t)((source_data[1] << 8) | source_data[0]);
-    IMU_data[num_IMU].omega[0] = (gx / 262.4f) * rad;
+    IMU_data[num_IMU].omega[0] = (gx / 262.4f) * rad + IMU_bias[num_IMU][0];
     int16_t gy = (int16_t)((source_data[3] << 8) | source_data[2]);
-    IMU_data[num_IMU].omega[1] = (gy / 262.4f) * rad;
+    IMU_data[num_IMU].omega[1] = (gy / 262.4f) * rad + IMU_bias[num_IMU][1];
     int16_t gz = (int16_t)((source_data[5] << 8) | source_data[4]);
-    IMU_data[num_IMU].omega[2] = (gz / 262.4f) * rad;
+    IMU_data[num_IMU].omega[2] = (gz / 262.4f) * rad + IMU_bias[num_IMU][2];
     int16_t ax = (int16_t)((source_data[7] << 8) | source_data[6]);
-    IMU_data[num_IMU].accel[0] = (ax / 16384.0f) * gravitation;
+    IMU_data[num_IMU].accel[0] = (ax / 16384.0f) * gravitation + IMU_bias[num_IMU][3];
     int16_t ay = (int16_t)((source_data[9] << 8) | source_data[8]);
-    IMU_data[num_IMU].accel[1] = (ay / 16384.0f) * gravitation;
+    IMU_data[num_IMU].accel[1] = (ay / 16384.0f) * gravitation + IMU_bias[num_IMU][4];
     int16_t az = (int16_t)((source_data[11] << 8) | source_data[10]);
-    IMU_data[num_IMU].accel[2] = (az / 16384.0f) * gravitation;
+    IMU_data[num_IMU].accel[2] = (az / 16384.0f) * gravitation + IMU_bias[num_IMU][5];
 }
 
 // Таймер с периодом 0.1с
@@ -751,8 +760,8 @@ void tim6_init(void)
     RCC->APB1ENR |= RCC_APB1ENR_TIM6EN;
 
     // Предделитель и автоперезагрузка
-    TIM6->PSC = 16000 - 1; // 1 тик = 1 мс
-    TIM6->ARR = 100 - 1;   // 100 тиков = 100 мс
+    TIM6->PSC = 9000 - 1; // 1 тик = 1 мс
+    TIM6->ARR = 1000 - 1; // 100 тиков = 100 мс
 
     // Разрешить прерывание по переполнению
     TIM6->DIER |= TIM_DIER_UIE;
@@ -771,14 +780,88 @@ void TIM6_DAC_IRQHandler(void)
     {
         // Сброс флага
         TIM6->SR &= ~TIM_SR_UIF;
-
         // Состояние пора читать IMU
         imu_state = start;
     }
 }
 
+void clock_init(void)
+{
+    // 1. Включаем тактирование блока питания
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN;
+
+    // 2. Выбираем Scale 1 для питания ядра
+    PWR->CR |= PWR_CR_VOS;
+
+    // 3. Устанавливаем делители шин:
+    // AHB  = SYSCLK / 1  = 180 MHz
+    // APB1 = HCLK   / 4  = 45 MHz
+    // APB2 = HCLK   / 2  = 90 MHz
+    RCC->CFGR &= ~(RCC_CFGR_HPRE |
+                   RCC_CFGR_PPRE1 |
+                   RCC_CFGR_PPRE2);
+
+    RCC->CFGR |= RCC_CFGR_HPRE_DIV1 |
+                 RCC_CFGR_PPRE1_DIV4 |
+                 RCC_CFGR_PPRE2_DIV2;
+
+    // 4. Отключаем PLL перед изменением параметров
+    RCC->CR &= ~RCC_CR_PLLON;
+
+    while (RCC->CR & RCC_CR_PLLRDY)
+        ;
+
+    // 5. Настраиваем PLL от HSI = 16 MHz:
+    // PLLM = 16, PLLN = 360, PLLP = 2
+    // 16 / 16 * 360 / 2 = 180 MHz
+    // PLLP = /2 кодируется нулём в поле PLLP
+    RCC->PLLCFGR =
+        (16U << RCC_PLLCFGR_PLLM_Pos) |
+        (360U << RCC_PLLCFGR_PLLN_Pos) |
+        RCC_PLLCFGR_PLLSRC_HSI |
+        (7U << RCC_PLLCFGR_PLLQ_Pos);
+
+    // 6. Запускаем PLL
+    RCC->CR |= RCC_CR_PLLON;
+
+    // 7. Включаем Over-drive для работы на 180 MHz
+    PWR->CR |= PWR_CR_ODEN;
+
+    while (!(PWR->CSR & PWR_CSR_ODRDY))
+        ;
+
+    PWR->CR |= PWR_CR_ODSWEN;
+
+    while (!(PWR->CSR & PWR_CSR_ODSWRDY))
+        ;
+
+    // 8. Настраиваем Flash: 5 тактов ожидания,
+    // предварительная выборка и кэши
+    FLASH->ACR = FLASH_ACR_LATENCY_5WS |
+                 FLASH_ACR_PRFTEN |
+                 FLASH_ACR_ICEN |
+                 FLASH_ACR_DCEN;
+
+    while ((FLASH->ACR & FLASH_ACR_LATENCY) !=
+           FLASH_ACR_LATENCY_5WS)
+        ;
+
+    // 9. Ждём готовности PLL
+    while (!(RCC->CR & RCC_CR_PLLRDY))
+        ;
+
+    // 10. Переключаем SYSCLK на PLL
+    RCC->CFGR &= ~RCC_CFGR_SW;
+    RCC->CFGR |= RCC_CFGR_SW_PLL;
+
+    while ((RCC->CFGR & RCC_CFGR_SWS) !=
+           RCC_CFGR_SWS_PLL)
+        ;
+}
+
 int main()
 {
+    clock_init();
     // Служебный светодиод
     RCC->AHB1ENR |= (1 << RCC_AHB1ENR_GPIOAEN_Pos);
     GPIOA->MODER &= ~GPIO_MODER_MODER5;
@@ -816,17 +899,26 @@ int main()
         }
         if (imu_state == got_data2)
         {
+            // num_data++;
+            // uart2_write_uint(num_data);
+            uart2_write_string("\n");
             convert_IMU_data(imu1_data, 0);
             uart2_write_string("omega1 = [");
             for (int i = 0; i < 3; i++)
             {
+                // sum_data[i] += IMU_data[0].omega[i];
                 uart2_write_float(IMU_data[0].omega[i]);
+                // uart2_write_string(" ");
+                // uart2_write_float(sum_data[i]);
                 uart2_write_string(",");
             }
             uart2_write_string("]    accel1 = [");
             for (int i = 0; i < 3; i++)
             {
+                // sum_data[i + 3] += IMU_data[0].accel[i];
                 uart2_write_float(IMU_data[0].accel[i]);
+                // uart2_write_string(" ");
+                // uart2_write_float(sum_data[i + 3]);
                 uart2_write_string(",");
             }
             uart2_write_string("]\n");
@@ -834,52 +926,71 @@ int main()
             uart2_write_string("omega2 = [");
             for (int i = 0; i < 3; i++)
             {
+                // sum_data[i + 6] += IMU_data[1].omega[i];
                 uart2_write_float(IMU_data[1].omega[i]);
+                // uart2_write_string(" ");
+                // uart2_write_float(sum_data[i + 6]);
                 uart2_write_string(",");
             }
             uart2_write_string("]    accel2 = [");
             for (int i = 0; i < 3; i++)
             {
+                // sum_data[i + 9] += IMU_data[1].accel[i];
                 uart2_write_float(IMU_data[1].accel[i]);
+                // uart2_write_string(" ");
+                // uart2_write_float(sum_data[i + 9]);
                 uart2_write_string(",");
             }
             uart2_write_string("]\n\n");
             imu_state = wait;
         }
-        // for (int i = 0; i < 3200000; i++)
-        //     __NOP();
-        //     if (frame_gps_saved)
+        // if (num_data == 1000)
+        // {
+        //     uart2_write_string("bias: \n");
+        //     for (int i = 0; i < 12; i++)
         //     {
-        //         if (upload_gnss_data(size_gps_data, gps_data))
-        //         {
-        //             uart2_write_string("LAT: ");
-        //             uart2_write_float(Gnss_data.latitude);
-        //             uart2_write_string("\r\n");
-
-        //             uart2_write_string("LON: ");
-        //             uart2_write_float(Gnss_data.longitude);
-        //             uart2_write_string("\r\n");
-
-        //             uart2_write_string("SPEED: ");
-        //             uart2_write_float(Gnss_data.speed);
-        //             uart2_write_string("\r\n");
-
-        //             uart2_write_string("COURSE: ");
-        //             uart2_write_float(Gnss_data.course);
-        //             uart2_write_string("\r\n");
-
-        //             uart2_write_string("SAT: ");
-        //             uart2_write_uint(Gnss_data.num_sat);
-        //             uart2_write_string("\r\n");
-
-        //             uart2_write_string("HDOP: ");
-        //             uart2_write_float(Gnss_data.hdop);
-        //             uart2_write_string("\r\n");
-
-        //             uart2_write_string("----------------\r\n");
-        //         }
-
-        //         frame_gps_saved = false;
+        //         long double average = sum_data[i] / num_data;
+        //         uart2_write_float(average);
+        //         uart2_write_string("\n");
         //     }
+        //     break;
+        // }
+        if (frame_gps_saved)
+        {
+            if (upload_gnss_data(size_gps_data, gps_data))
+            {
+                uart2_write_string("LAT: ");
+                uart2_write_float(Gnss_data.latitude);
+                uart2_write_string("    ");
+
+                uart2_write_string("LON: ");
+                uart2_write_float(Gnss_data.longitude);
+                uart2_write_string("    ");
+
+                uart2_write_string("ALT: ");
+                uart2_write_float(Gnss_data.altitude);
+                uart2_write_string("    ");
+
+                uart2_write_string("SPEED: ");
+                uart2_write_float(Gnss_data.speed);
+                uart2_write_string("    ");
+
+                uart2_write_string("COURSE: ");
+                uart2_write_float(Gnss_data.course);
+                uart2_write_string("    ");
+
+                uart2_write_string("SAT: ");
+                uart2_write_uint(Gnss_data.num_sat);
+                uart2_write_string("    ");
+
+                uart2_write_string("HDOP: ");
+                uart2_write_float(Gnss_data.hdop);
+                uart2_write_string("    ");
+
+                uart2_write_string("\n\n");
+            }
+
+            frame_gps_saved = false;
+        }
     }
 }
